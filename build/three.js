@@ -10,7 +10,7 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
 	(global = typeof globalThis !== 'undefined' ? globalThis : global || self, factory(global.THREE = {}));
 })(this, (function (exports) { 'use strict';
 
-	const REVISION = '150';
+	const REVISION = '151dev';
 	const MOUSE = { LEFT: 0, MIDDLE: 1, RIGHT: 2, ROTATE: 0, DOLLY: 1, PAN: 2 };
 	const TOUCH = { ROTATE: 0, PAN: 1, DOLLY_PAN: 2, DOLLY_ROTATE: 3 };
 	const CullFaceNone = 0;
@@ -9357,6 +9357,175 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
 
 	}
 
+	// Fast Half Float Conversions, http://www.fox-toolkit.org/ftp/fasthalffloatconversion.pdf
+
+	const _tables = /*@__PURE__*/ _generateTables();
+
+	function _generateTables() {
+
+		// float32 to float16 helpers
+
+		const buffer = new ArrayBuffer( 4 );
+		const floatView = new Float32Array( buffer );
+		const uint32View = new Uint32Array( buffer );
+
+		const baseTable = new Uint32Array( 512 );
+		const shiftTable = new Uint32Array( 512 );
+
+		for ( let i = 0; i < 256; ++ i ) {
+
+			const e = i - 127;
+
+			// very small number (0, -0)
+
+			if ( e < - 27 ) {
+
+				baseTable[ i ] = 0x0000;
+				baseTable[ i | 0x100 ] = 0x8000;
+				shiftTable[ i ] = 24;
+				shiftTable[ i | 0x100 ] = 24;
+
+				// small number (denorm)
+
+			} else if ( e < - 14 ) {
+
+				baseTable[ i ] = 0x0400 >> ( - e - 14 );
+				baseTable[ i | 0x100 ] = ( 0x0400 >> ( - e - 14 ) ) | 0x8000;
+				shiftTable[ i ] = - e - 1;
+				shiftTable[ i | 0x100 ] = - e - 1;
+
+				// normal number
+
+			} else if ( e <= 15 ) {
+
+				baseTable[ i ] = ( e + 15 ) << 10;
+				baseTable[ i | 0x100 ] = ( ( e + 15 ) << 10 ) | 0x8000;
+				shiftTable[ i ] = 13;
+				shiftTable[ i | 0x100 ] = 13;
+
+				// large number (Infinity, -Infinity)
+
+			} else if ( e < 128 ) {
+
+				baseTable[ i ] = 0x7c00;
+				baseTable[ i | 0x100 ] = 0xfc00;
+				shiftTable[ i ] = 24;
+				shiftTable[ i | 0x100 ] = 24;
+
+				// stay (NaN, Infinity, -Infinity)
+
+			} else {
+
+				baseTable[ i ] = 0x7c00;
+				baseTable[ i | 0x100 ] = 0xfc00;
+				shiftTable[ i ] = 13;
+				shiftTable[ i | 0x100 ] = 13;
+
+			}
+
+		}
+
+		// float16 to float32 helpers
+
+		const mantissaTable = new Uint32Array( 2048 );
+		const exponentTable = new Uint32Array( 64 );
+		const offsetTable = new Uint32Array( 64 );
+
+		for ( let i = 1; i < 1024; ++ i ) {
+
+			let m = i << 13; // zero pad mantissa bits
+			let e = 0; // zero exponent
+
+			// normalized
+			while ( ( m & 0x00800000 ) === 0 ) {
+
+				m <<= 1;
+				e -= 0x00800000; // decrement exponent
+
+			}
+
+			m &= ~ 0x00800000; // clear leading 1 bit
+			e += 0x38800000; // adjust bias
+
+			mantissaTable[ i ] = m | e;
+
+		}
+
+		for ( let i = 1024; i < 2048; ++ i ) {
+
+			mantissaTable[ i ] = 0x38000000 + ( ( i - 1024 ) << 13 );
+
+		}
+
+		for ( let i = 1; i < 31; ++ i ) {
+
+			exponentTable[ i ] = i << 23;
+
+		}
+
+		exponentTable[ 31 ] = 0x47800000;
+		exponentTable[ 32 ] = 0x80000000;
+
+		for ( let i = 33; i < 63; ++ i ) {
+
+			exponentTable[ i ] = 0x80000000 + ( ( i - 32 ) << 23 );
+
+		}
+
+		exponentTable[ 63 ] = 0xc7800000;
+
+		for ( let i = 1; i < 64; ++ i ) {
+
+			if ( i !== 32 ) {
+
+				offsetTable[ i ] = 1024;
+
+			}
+
+		}
+
+		return {
+			floatView: floatView,
+			uint32View: uint32View,
+			baseTable: baseTable,
+			shiftTable: shiftTable,
+			mantissaTable: mantissaTable,
+			exponentTable: exponentTable,
+			offsetTable: offsetTable
+		};
+
+	}
+
+	// float32 to float16
+
+	function toHalfFloat( val ) {
+
+		if ( Math.abs( val ) > 65504 ) console.warn( 'THREE.DataUtils.toHalfFloat(): Value out of range.' );
+
+		val = clamp( val, - 65504, 65504 );
+
+		_tables.floatView[ 0 ] = val;
+		const f = _tables.uint32View[ 0 ];
+		const e = ( f >> 23 ) & 0x1ff;
+		return _tables.baseTable[ e ] + ( ( f & 0x007fffff ) >> _tables.shiftTable[ e ] );
+
+	}
+
+	// float16 to float32
+
+	function fromHalfFloat( val ) {
+
+		const m = val >> 10;
+		_tables.uint32View[ 0 ] = _tables.mantissaTable[ _tables.offsetTable[ m ] + ( val & 0x3ff ) ] + _tables.exponentTable[ m ];
+		return _tables.floatView[ 0 ];
+
+	}
+
+	const DataUtils = {
+		toHalfFloat: toHalfFloat,
+		fromHalfFloat: fromHalfFloat,
+	};
+
 	const _vector$9 = /*@__PURE__*/ new Vector3();
 	const _vector2$1 = /*@__PURE__*/ new Vector2();
 
@@ -9804,6 +9973,146 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
 			super( new Uint16Array( array ), itemSize, normalized );
 
 			this.isFloat16BufferAttribute = true;
+
+		}
+
+		getX( index ) {
+
+			let x = fromHalfFloat( this.array[ index * this.itemSize ] );
+
+			if ( this.normalized ) x = denormalize( x, this.array );
+
+			return x;
+
+		}
+
+		setX( index, x ) {
+
+			if ( this.normalized ) x = normalize( x, this.array );
+
+			this.array[ index * this.itemSize ] = toHalfFloat( x );
+
+			return this;
+
+		}
+
+		getY( index ) {
+
+			let y = fromHalfFloat( this.array[ index * this.itemSize + 1 ] );
+
+			if ( this.normalized ) y = denormalize( y, this.array );
+
+			return y;
+
+		}
+
+		setY( index, y ) {
+
+			if ( this.normalized ) y = normalize( y, this.array );
+
+			this.array[ index * this.itemSize + 1 ] = toHalfFloat( y );
+
+			return this;
+
+		}
+
+		getZ( index ) {
+
+			let z = fromHalfFloat( this.array[ index * this.itemSize + 2 ] );
+
+			if ( this.normalized ) z = denormalize( z, this.array );
+
+			return z;
+
+		}
+
+		setZ( index, z ) {
+
+			if ( this.normalized ) z = normalize( z, this.array );
+
+			this.array[ index * this.itemSize + 2 ] = toHalfFloat( z );
+
+			return this;
+
+		}
+
+		getW( index ) {
+
+			let w = fromHalfFloat( this.array[ index * this.itemSize + 3 ] );
+
+			if ( this.normalized ) w = denormalize( w, this.array );
+
+			return w;
+
+		}
+
+		setW( index, w ) {
+
+			if ( this.normalized ) w = normalize( w, this.array );
+
+			this.array[ index * this.itemSize + 3 ] = toHalfFloat( w );
+
+			return this;
+
+		}
+
+		setXY( index, x, y ) {
+
+			index *= this.itemSize;
+
+			if ( this.normalized ) {
+
+				x = normalize( x, this.array );
+				y = normalize( y, this.array );
+
+			}
+
+			this.array[ index + 0 ] = toHalfFloat( x );
+			this.array[ index + 1 ] = toHalfFloat( y );
+
+			return this;
+
+		}
+
+		setXYZ( index, x, y, z ) {
+
+			index *= this.itemSize;
+
+			if ( this.normalized ) {
+
+				x = normalize( x, this.array );
+				y = normalize( y, this.array );
+				z = normalize( z, this.array );
+
+			}
+
+			this.array[ index + 0 ] = toHalfFloat( x );
+			this.array[ index + 1 ] = toHalfFloat( y );
+			this.array[ index + 2 ] = toHalfFloat( z );
+
+			return this;
+
+		}
+
+		setXYZW( index, x, y, z, w ) {
+
+			index *= this.itemSize;
+
+			if ( this.normalized ) {
+
+				x = normalize( x, this.array );
+				y = normalize( y, this.array );
+				z = normalize( z, this.array );
+				w = normalize( w, this.array );
+
+			}
+
+			this.array[ index + 0 ] = toHalfFloat( x );
+			this.array[ index + 1 ] = toHalfFloat( y );
+			this.array[ index + 2 ] = toHalfFloat( z );
+			this.array[ index + 3 ] = toHalfFloat( w );
+
+			return this;
 
 		}
 
@@ -28260,7 +28569,7 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
 
 			if ( _clippingEnabled === true ) clipping.setGlobalState( _this.clippingPlanes, camera );
 
-			if ( transmissiveObjects.length > 0 ) renderTransmissionPass( opaqueObjects, scene, camera );
+			if ( transmissiveObjects.length > 0 ) renderTransmissionPass( opaqueObjects, transmissiveObjects, scene, camera );
 
 			if ( viewport ) state.viewport( _currentViewport.copy( viewport ) );
 
@@ -28278,11 +28587,11 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
 
 		}
 
-		function renderTransmissionPass( opaqueObjects, scene, camera ) {
-
-			const isWebGL2 = capabilities.isWebGL2;
+		function renderTransmissionPass( opaqueObjects, transmissiveObjects, scene, camera ) {
 
 			if ( _transmissionRenderTarget === null ) {
+
+				const isWebGL2 = capabilities.isWebGL2;
 
 				_transmissionRenderTarget = new WebGLRenderTarget( 1024, 1024, {
 					generateMipmaps: true,
@@ -28290,6 +28599,16 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
 					minFilter: LinearMipmapLinearFilter,
 					samples: ( isWebGL2 && _antialias === true ) ? 4 : 0
 				} );
+
+				// debug
+
+				/*
+				const geometry = new PlaneGeometry();
+				const material = new MeshBasicMaterial( { map: _transmissionRenderTarget.texture } );
+
+				const mesh = new Mesh( geometry, material );
+				scene.add( mesh );
+				*/
 
 			}
 
@@ -28306,12 +28625,48 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
 
 			renderObjects( opaqueObjects, scene, camera );
 
-			_this.toneMapping = currentToneMapping;
-
 			textures.updateMultisampleRenderTarget( _transmissionRenderTarget );
 			textures.updateRenderTargetMipmap( _transmissionRenderTarget );
 
+			let renderTargetNeedsUpdate = false;
+
+			for ( let i = 0, l = transmissiveObjects.length; i < l; i ++ ) {
+
+				const renderItem = transmissiveObjects[ i ];
+
+				const object = renderItem.object;
+				const geometry = renderItem.geometry;
+				const material = renderItem.material;
+				const group = renderItem.group;
+
+				if ( material.side === DoubleSide && object.layers.test( camera.layers ) ) {
+
+					const currentSide = material.side;
+
+					material.side = BackSide;
+					material.needsUpdate = true;
+
+					renderObject( object, scene, camera, geometry, material, group );
+
+					material.side = currentSide;
+					material.needsUpdate = true;
+
+					renderTargetNeedsUpdate = true;
+
+				}
+
+			}
+
+			if ( renderTargetNeedsUpdate === true ) {
+
+				textures.updateMultisampleRenderTarget( _transmissionRenderTarget );
+				textures.updateRenderTargetMipmap( _transmissionRenderTarget );
+
+			}
+
 			_this.setRenderTarget( currentRenderTarget );
+
+			_this.toneMapping = currentToneMapping;
 
 		}
 
@@ -50006,175 +50361,6 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
 
 	}
 
-	// Fast Half Float Conversions, http://www.fox-toolkit.org/ftp/fasthalffloatconversion.pdf
-
-	const _tables = /*@__PURE__*/ _generateTables();
-
-	function _generateTables() {
-
-		// float32 to float16 helpers
-
-		const buffer = new ArrayBuffer( 4 );
-		const floatView = new Float32Array( buffer );
-		const uint32View = new Uint32Array( buffer );
-
-		const baseTable = new Uint32Array( 512 );
-		const shiftTable = new Uint32Array( 512 );
-
-		for ( let i = 0; i < 256; ++ i ) {
-
-			const e = i - 127;
-
-			// very small number (0, -0)
-
-			if ( e < - 27 ) {
-
-				baseTable[ i ] = 0x0000;
-				baseTable[ i | 0x100 ] = 0x8000;
-				shiftTable[ i ] = 24;
-				shiftTable[ i | 0x100 ] = 24;
-
-				// small number (denorm)
-
-			} else if ( e < - 14 ) {
-
-				baseTable[ i ] = 0x0400 >> ( - e - 14 );
-				baseTable[ i | 0x100 ] = ( 0x0400 >> ( - e - 14 ) ) | 0x8000;
-				shiftTable[ i ] = - e - 1;
-				shiftTable[ i | 0x100 ] = - e - 1;
-
-				// normal number
-
-			} else if ( e <= 15 ) {
-
-				baseTable[ i ] = ( e + 15 ) << 10;
-				baseTable[ i | 0x100 ] = ( ( e + 15 ) << 10 ) | 0x8000;
-				shiftTable[ i ] = 13;
-				shiftTable[ i | 0x100 ] = 13;
-
-				// large number (Infinity, -Infinity)
-
-			} else if ( e < 128 ) {
-
-				baseTable[ i ] = 0x7c00;
-				baseTable[ i | 0x100 ] = 0xfc00;
-				shiftTable[ i ] = 24;
-				shiftTable[ i | 0x100 ] = 24;
-
-				// stay (NaN, Infinity, -Infinity)
-
-			} else {
-
-				baseTable[ i ] = 0x7c00;
-				baseTable[ i | 0x100 ] = 0xfc00;
-				shiftTable[ i ] = 13;
-				shiftTable[ i | 0x100 ] = 13;
-
-			}
-
-		}
-
-		// float16 to float32 helpers
-
-		const mantissaTable = new Uint32Array( 2048 );
-		const exponentTable = new Uint32Array( 64 );
-		const offsetTable = new Uint32Array( 64 );
-
-		for ( let i = 1; i < 1024; ++ i ) {
-
-			let m = i << 13; // zero pad mantissa bits
-			let e = 0; // zero exponent
-
-			// normalized
-			while ( ( m & 0x00800000 ) === 0 ) {
-
-				m <<= 1;
-				e -= 0x00800000; // decrement exponent
-
-			}
-
-			m &= ~ 0x00800000; // clear leading 1 bit
-			e += 0x38800000; // adjust bias
-
-			mantissaTable[ i ] = m | e;
-
-		}
-
-		for ( let i = 1024; i < 2048; ++ i ) {
-
-			mantissaTable[ i ] = 0x38000000 + ( ( i - 1024 ) << 13 );
-
-		}
-
-		for ( let i = 1; i < 31; ++ i ) {
-
-			exponentTable[ i ] = i << 23;
-
-		}
-
-		exponentTable[ 31 ] = 0x47800000;
-		exponentTable[ 32 ] = 0x80000000;
-
-		for ( let i = 33; i < 63; ++ i ) {
-
-			exponentTable[ i ] = 0x80000000 + ( ( i - 32 ) << 23 );
-
-		}
-
-		exponentTable[ 63 ] = 0xc7800000;
-
-		for ( let i = 1; i < 64; ++ i ) {
-
-			if ( i !== 32 ) {
-
-				offsetTable[ i ] = 1024;
-
-			}
-
-		}
-
-		return {
-			floatView: floatView,
-			uint32View: uint32View,
-			baseTable: baseTable,
-			shiftTable: shiftTable,
-			mantissaTable: mantissaTable,
-			exponentTable: exponentTable,
-			offsetTable: offsetTable
-		};
-
-	}
-
-	// float32 to float16
-
-	function toHalfFloat( val ) {
-
-		if ( Math.abs( val ) > 65504 ) console.warn( 'THREE.DataUtils.toHalfFloat(): Value out of range.' );
-
-		val = clamp( val, - 65504, 65504 );
-
-		_tables.floatView[ 0 ] = val;
-		const f = _tables.uint32View[ 0 ];
-		const e = ( f >> 23 ) & 0x1ff;
-		return _tables.baseTable[ e ] + ( ( f & 0x007fffff ) >> _tables.shiftTable[ e ] );
-
-	}
-
-	// float16 to float32
-
-	function fromHalfFloat( val ) {
-
-		const m = val >> 10;
-		_tables.uint32View[ 0 ] = _tables.mantissaTable[ _tables.offsetTable[ m ] + ( val & 0x3ff ) ] + _tables.exponentTable[ m ];
-		return _tables.floatView[ 0 ];
-
-	}
-
-	const DataUtils = {
-		toHalfFloat: toHalfFloat,
-		fromHalfFloat: fromHalfFloat,
-	};
-
 	// r144
 
 	class BoxBufferGeometry extends BoxGeometry {
@@ -50855,3 +51041,4 @@ console.warn( 'Scripts "build/three.js" and "build/three.min.js" are deprecated 
 	exports.sRGBEncoding = sRGBEncoding;
 
 }));
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJmaWxlIjoidGhyZWUuanMiLCJzb3VyY2VzIjpbXSwic291cmNlc0NvbnRlbnQiOltdLCJuYW1lcyI6W10sIm1hcHBpbmdzIjoiIn0=

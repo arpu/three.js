@@ -3,7 +3,7 @@
  * Copyright 2010-2023 Three.js Authors
  * SPDX-License-Identifier: MIT
  */
-const REVISION = '150';
+const REVISION = '151dev';
 const MOUSE = { LEFT: 0, MIDDLE: 1, RIGHT: 2, ROTATE: 0, DOLLY: 1, PAN: 2 };
 const TOUCH = { ROTATE: 0, PAN: 1, DOLLY_PAN: 2, DOLLY_ROTATE: 3 };
 const CullFaceNone = 0;
@@ -9350,6 +9350,175 @@ class MeshBasicMaterial extends Material {
 
 }
 
+// Fast Half Float Conversions, http://www.fox-toolkit.org/ftp/fasthalffloatconversion.pdf
+
+const _tables = /*@__PURE__*/ _generateTables();
+
+function _generateTables() {
+
+	// float32 to float16 helpers
+
+	const buffer = new ArrayBuffer( 4 );
+	const floatView = new Float32Array( buffer );
+	const uint32View = new Uint32Array( buffer );
+
+	const baseTable = new Uint32Array( 512 );
+	const shiftTable = new Uint32Array( 512 );
+
+	for ( let i = 0; i < 256; ++ i ) {
+
+		const e = i - 127;
+
+		// very small number (0, -0)
+
+		if ( e < - 27 ) {
+
+			baseTable[ i ] = 0x0000;
+			baseTable[ i | 0x100 ] = 0x8000;
+			shiftTable[ i ] = 24;
+			shiftTable[ i | 0x100 ] = 24;
+
+			// small number (denorm)
+
+		} else if ( e < - 14 ) {
+
+			baseTable[ i ] = 0x0400 >> ( - e - 14 );
+			baseTable[ i | 0x100 ] = ( 0x0400 >> ( - e - 14 ) ) | 0x8000;
+			shiftTable[ i ] = - e - 1;
+			shiftTable[ i | 0x100 ] = - e - 1;
+
+			// normal number
+
+		} else if ( e <= 15 ) {
+
+			baseTable[ i ] = ( e + 15 ) << 10;
+			baseTable[ i | 0x100 ] = ( ( e + 15 ) << 10 ) | 0x8000;
+			shiftTable[ i ] = 13;
+			shiftTable[ i | 0x100 ] = 13;
+
+			// large number (Infinity, -Infinity)
+
+		} else if ( e < 128 ) {
+
+			baseTable[ i ] = 0x7c00;
+			baseTable[ i | 0x100 ] = 0xfc00;
+			shiftTable[ i ] = 24;
+			shiftTable[ i | 0x100 ] = 24;
+
+			// stay (NaN, Infinity, -Infinity)
+
+		} else {
+
+			baseTable[ i ] = 0x7c00;
+			baseTable[ i | 0x100 ] = 0xfc00;
+			shiftTable[ i ] = 13;
+			shiftTable[ i | 0x100 ] = 13;
+
+		}
+
+	}
+
+	// float16 to float32 helpers
+
+	const mantissaTable = new Uint32Array( 2048 );
+	const exponentTable = new Uint32Array( 64 );
+	const offsetTable = new Uint32Array( 64 );
+
+	for ( let i = 1; i < 1024; ++ i ) {
+
+		let m = i << 13; // zero pad mantissa bits
+		let e = 0; // zero exponent
+
+		// normalized
+		while ( ( m & 0x00800000 ) === 0 ) {
+
+			m <<= 1;
+			e -= 0x00800000; // decrement exponent
+
+		}
+
+		m &= ~ 0x00800000; // clear leading 1 bit
+		e += 0x38800000; // adjust bias
+
+		mantissaTable[ i ] = m | e;
+
+	}
+
+	for ( let i = 1024; i < 2048; ++ i ) {
+
+		mantissaTable[ i ] = 0x38000000 + ( ( i - 1024 ) << 13 );
+
+	}
+
+	for ( let i = 1; i < 31; ++ i ) {
+
+		exponentTable[ i ] = i << 23;
+
+	}
+
+	exponentTable[ 31 ] = 0x47800000;
+	exponentTable[ 32 ] = 0x80000000;
+
+	for ( let i = 33; i < 63; ++ i ) {
+
+		exponentTable[ i ] = 0x80000000 + ( ( i - 32 ) << 23 );
+
+	}
+
+	exponentTable[ 63 ] = 0xc7800000;
+
+	for ( let i = 1; i < 64; ++ i ) {
+
+		if ( i !== 32 ) {
+
+			offsetTable[ i ] = 1024;
+
+		}
+
+	}
+
+	return {
+		floatView: floatView,
+		uint32View: uint32View,
+		baseTable: baseTable,
+		shiftTable: shiftTable,
+		mantissaTable: mantissaTable,
+		exponentTable: exponentTable,
+		offsetTable: offsetTable
+	};
+
+}
+
+// float32 to float16
+
+function toHalfFloat( val ) {
+
+	if ( Math.abs( val ) > 65504 ) console.warn( 'THREE.DataUtils.toHalfFloat(): Value out of range.' );
+
+	val = clamp( val, - 65504, 65504 );
+
+	_tables.floatView[ 0 ] = val;
+	const f = _tables.uint32View[ 0 ];
+	const e = ( f >> 23 ) & 0x1ff;
+	return _tables.baseTable[ e ] + ( ( f & 0x007fffff ) >> _tables.shiftTable[ e ] );
+
+}
+
+// float16 to float32
+
+function fromHalfFloat( val ) {
+
+	const m = val >> 10;
+	_tables.uint32View[ 0 ] = _tables.mantissaTable[ _tables.offsetTable[ m ] + ( val & 0x3ff ) ] + _tables.exponentTable[ m ];
+	return _tables.floatView[ 0 ];
+
+}
+
+const DataUtils = {
+	toHalfFloat: toHalfFloat,
+	fromHalfFloat: fromHalfFloat,
+};
+
 const _vector$9 = /*@__PURE__*/ new Vector3();
 const _vector2$1 = /*@__PURE__*/ new Vector2();
 
@@ -9797,6 +9966,146 @@ class Float16BufferAttribute extends BufferAttribute {
 		super( new Uint16Array( array ), itemSize, normalized );
 
 		this.isFloat16BufferAttribute = true;
+
+	}
+
+	getX( index ) {
+
+		let x = fromHalfFloat( this.array[ index * this.itemSize ] );
+
+		if ( this.normalized ) x = denormalize( x, this.array );
+
+		return x;
+
+	}
+
+	setX( index, x ) {
+
+		if ( this.normalized ) x = normalize( x, this.array );
+
+		this.array[ index * this.itemSize ] = toHalfFloat( x );
+
+		return this;
+
+	}
+
+	getY( index ) {
+
+		let y = fromHalfFloat( this.array[ index * this.itemSize + 1 ] );
+
+		if ( this.normalized ) y = denormalize( y, this.array );
+
+		return y;
+
+	}
+
+	setY( index, y ) {
+
+		if ( this.normalized ) y = normalize( y, this.array );
+
+		this.array[ index * this.itemSize + 1 ] = toHalfFloat( y );
+
+		return this;
+
+	}
+
+	getZ( index ) {
+
+		let z = fromHalfFloat( this.array[ index * this.itemSize + 2 ] );
+
+		if ( this.normalized ) z = denormalize( z, this.array );
+
+		return z;
+
+	}
+
+	setZ( index, z ) {
+
+		if ( this.normalized ) z = normalize( z, this.array );
+
+		this.array[ index * this.itemSize + 2 ] = toHalfFloat( z );
+
+		return this;
+
+	}
+
+	getW( index ) {
+
+		let w = fromHalfFloat( this.array[ index * this.itemSize + 3 ] );
+
+		if ( this.normalized ) w = denormalize( w, this.array );
+
+		return w;
+
+	}
+
+	setW( index, w ) {
+
+		if ( this.normalized ) w = normalize( w, this.array );
+
+		this.array[ index * this.itemSize + 3 ] = toHalfFloat( w );
+
+		return this;
+
+	}
+
+	setXY( index, x, y ) {
+
+		index *= this.itemSize;
+
+		if ( this.normalized ) {
+
+			x = normalize( x, this.array );
+			y = normalize( y, this.array );
+
+		}
+
+		this.array[ index + 0 ] = toHalfFloat( x );
+		this.array[ index + 1 ] = toHalfFloat( y );
+
+		return this;
+
+	}
+
+	setXYZ( index, x, y, z ) {
+
+		index *= this.itemSize;
+
+		if ( this.normalized ) {
+
+			x = normalize( x, this.array );
+			y = normalize( y, this.array );
+			z = normalize( z, this.array );
+
+		}
+
+		this.array[ index + 0 ] = toHalfFloat( x );
+		this.array[ index + 1 ] = toHalfFloat( y );
+		this.array[ index + 2 ] = toHalfFloat( z );
+
+		return this;
+
+	}
+
+	setXYZW( index, x, y, z, w ) {
+
+		index *= this.itemSize;
+
+		if ( this.normalized ) {
+
+			x = normalize( x, this.array );
+			y = normalize( y, this.array );
+			z = normalize( z, this.array );
+			w = normalize( w, this.array );
+
+		}
+
+		this.array[ index + 0 ] = toHalfFloat( x );
+		this.array[ index + 1 ] = toHalfFloat( y );
+		this.array[ index + 2 ] = toHalfFloat( z );
+		this.array[ index + 3 ] = toHalfFloat( w );
+
+		return this;
 
 	}
 
@@ -28253,7 +28562,7 @@ function WebGLRenderer( parameters = {} ) {
 
 		if ( _clippingEnabled === true ) clipping.setGlobalState( _this.clippingPlanes, camera );
 
-		if ( transmissiveObjects.length > 0 ) renderTransmissionPass( opaqueObjects, scene, camera );
+		if ( transmissiveObjects.length > 0 ) renderTransmissionPass( opaqueObjects, transmissiveObjects, scene, camera );
 
 		if ( viewport ) state.viewport( _currentViewport.copy( viewport ) );
 
@@ -28271,11 +28580,11 @@ function WebGLRenderer( parameters = {} ) {
 
 	}
 
-	function renderTransmissionPass( opaqueObjects, scene, camera ) {
-
-		const isWebGL2 = capabilities.isWebGL2;
+	function renderTransmissionPass( opaqueObjects, transmissiveObjects, scene, camera ) {
 
 		if ( _transmissionRenderTarget === null ) {
+
+			const isWebGL2 = capabilities.isWebGL2;
 
 			_transmissionRenderTarget = new WebGLRenderTarget( 1024, 1024, {
 				generateMipmaps: true,
@@ -28283,6 +28592,16 @@ function WebGLRenderer( parameters = {} ) {
 				minFilter: LinearMipmapLinearFilter,
 				samples: ( isWebGL2 && _antialias === true ) ? 4 : 0
 			} );
+
+			// debug
+
+			/*
+			const geometry = new PlaneGeometry();
+			const material = new MeshBasicMaterial( { map: _transmissionRenderTarget.texture } );
+
+			const mesh = new Mesh( geometry, material );
+			scene.add( mesh );
+			*/
 
 		}
 
@@ -28299,12 +28618,48 @@ function WebGLRenderer( parameters = {} ) {
 
 		renderObjects( opaqueObjects, scene, camera );
 
-		_this.toneMapping = currentToneMapping;
-
 		textures.updateMultisampleRenderTarget( _transmissionRenderTarget );
 		textures.updateRenderTargetMipmap( _transmissionRenderTarget );
 
+		let renderTargetNeedsUpdate = false;
+
+		for ( let i = 0, l = transmissiveObjects.length; i < l; i ++ ) {
+
+			const renderItem = transmissiveObjects[ i ];
+
+			const object = renderItem.object;
+			const geometry = renderItem.geometry;
+			const material = renderItem.material;
+			const group = renderItem.group;
+
+			if ( material.side === DoubleSide && object.layers.test( camera.layers ) ) {
+
+				const currentSide = material.side;
+
+				material.side = BackSide;
+				material.needsUpdate = true;
+
+				renderObject( object, scene, camera, geometry, material, group );
+
+				material.side = currentSide;
+				material.needsUpdate = true;
+
+				renderTargetNeedsUpdate = true;
+
+			}
+
+		}
+
+		if ( renderTargetNeedsUpdate === true ) {
+
+			textures.updateMultisampleRenderTarget( _transmissionRenderTarget );
+			textures.updateRenderTargetMipmap( _transmissionRenderTarget );
+
+		}
+
 		_this.setRenderTarget( currentRenderTarget );
+
+		_this.toneMapping = currentToneMapping;
 
 	}
 
@@ -49999,175 +50354,6 @@ class ShapePath {
 
 }
 
-// Fast Half Float Conversions, http://www.fox-toolkit.org/ftp/fasthalffloatconversion.pdf
-
-const _tables = /*@__PURE__*/ _generateTables();
-
-function _generateTables() {
-
-	// float32 to float16 helpers
-
-	const buffer = new ArrayBuffer( 4 );
-	const floatView = new Float32Array( buffer );
-	const uint32View = new Uint32Array( buffer );
-
-	const baseTable = new Uint32Array( 512 );
-	const shiftTable = new Uint32Array( 512 );
-
-	for ( let i = 0; i < 256; ++ i ) {
-
-		const e = i - 127;
-
-		// very small number (0, -0)
-
-		if ( e < - 27 ) {
-
-			baseTable[ i ] = 0x0000;
-			baseTable[ i | 0x100 ] = 0x8000;
-			shiftTable[ i ] = 24;
-			shiftTable[ i | 0x100 ] = 24;
-
-			// small number (denorm)
-
-		} else if ( e < - 14 ) {
-
-			baseTable[ i ] = 0x0400 >> ( - e - 14 );
-			baseTable[ i | 0x100 ] = ( 0x0400 >> ( - e - 14 ) ) | 0x8000;
-			shiftTable[ i ] = - e - 1;
-			shiftTable[ i | 0x100 ] = - e - 1;
-
-			// normal number
-
-		} else if ( e <= 15 ) {
-
-			baseTable[ i ] = ( e + 15 ) << 10;
-			baseTable[ i | 0x100 ] = ( ( e + 15 ) << 10 ) | 0x8000;
-			shiftTable[ i ] = 13;
-			shiftTable[ i | 0x100 ] = 13;
-
-			// large number (Infinity, -Infinity)
-
-		} else if ( e < 128 ) {
-
-			baseTable[ i ] = 0x7c00;
-			baseTable[ i | 0x100 ] = 0xfc00;
-			shiftTable[ i ] = 24;
-			shiftTable[ i | 0x100 ] = 24;
-
-			// stay (NaN, Infinity, -Infinity)
-
-		} else {
-
-			baseTable[ i ] = 0x7c00;
-			baseTable[ i | 0x100 ] = 0xfc00;
-			shiftTable[ i ] = 13;
-			shiftTable[ i | 0x100 ] = 13;
-
-		}
-
-	}
-
-	// float16 to float32 helpers
-
-	const mantissaTable = new Uint32Array( 2048 );
-	const exponentTable = new Uint32Array( 64 );
-	const offsetTable = new Uint32Array( 64 );
-
-	for ( let i = 1; i < 1024; ++ i ) {
-
-		let m = i << 13; // zero pad mantissa bits
-		let e = 0; // zero exponent
-
-		// normalized
-		while ( ( m & 0x00800000 ) === 0 ) {
-
-			m <<= 1;
-			e -= 0x00800000; // decrement exponent
-
-		}
-
-		m &= ~ 0x00800000; // clear leading 1 bit
-		e += 0x38800000; // adjust bias
-
-		mantissaTable[ i ] = m | e;
-
-	}
-
-	for ( let i = 1024; i < 2048; ++ i ) {
-
-		mantissaTable[ i ] = 0x38000000 + ( ( i - 1024 ) << 13 );
-
-	}
-
-	for ( let i = 1; i < 31; ++ i ) {
-
-		exponentTable[ i ] = i << 23;
-
-	}
-
-	exponentTable[ 31 ] = 0x47800000;
-	exponentTable[ 32 ] = 0x80000000;
-
-	for ( let i = 33; i < 63; ++ i ) {
-
-		exponentTable[ i ] = 0x80000000 + ( ( i - 32 ) << 23 );
-
-	}
-
-	exponentTable[ 63 ] = 0xc7800000;
-
-	for ( let i = 1; i < 64; ++ i ) {
-
-		if ( i !== 32 ) {
-
-			offsetTable[ i ] = 1024;
-
-		}
-
-	}
-
-	return {
-		floatView: floatView,
-		uint32View: uint32View,
-		baseTable: baseTable,
-		shiftTable: shiftTable,
-		mantissaTable: mantissaTable,
-		exponentTable: exponentTable,
-		offsetTable: offsetTable
-	};
-
-}
-
-// float32 to float16
-
-function toHalfFloat( val ) {
-
-	if ( Math.abs( val ) > 65504 ) console.warn( 'THREE.DataUtils.toHalfFloat(): Value out of range.' );
-
-	val = clamp( val, - 65504, 65504 );
-
-	_tables.floatView[ 0 ] = val;
-	const f = _tables.uint32View[ 0 ];
-	const e = ( f >> 23 ) & 0x1ff;
-	return _tables.baseTable[ e ] + ( ( f & 0x007fffff ) >> _tables.shiftTable[ e ] );
-
-}
-
-// float16 to float32
-
-function fromHalfFloat( val ) {
-
-	const m = val >> 10;
-	_tables.uint32View[ 0 ] = _tables.mantissaTable[ _tables.offsetTable[ m ] + ( val & 0x3ff ) ] + _tables.exponentTable[ m ];
-	return _tables.floatView[ 0 ];
-
-}
-
-const DataUtils = {
-	toHalfFloat: toHalfFloat,
-	fromHalfFloat: fromHalfFloat,
-};
-
 // r144
 
 class BoxBufferGeometry extends BoxGeometry {
@@ -50439,3 +50625,4 @@ if ( typeof window !== 'undefined' ) {
 }
 
 export { ACESFilmicToneMapping, AddEquation, AddOperation, AdditiveAnimationBlendMode, AdditiveBlending, AlphaFormat, AlwaysDepth, AlwaysStencilFunc, AmbientLight, AmbientLightProbe, AnimationClip, AnimationLoader, AnimationMixer, AnimationObjectGroup, AnimationUtils, ArcCurve, ArrayCamera, ArrowHelper, Audio, AudioAnalyser, AudioContext, AudioListener, AudioLoader, AxesHelper, BackSide, BasicDepthPacking, BasicShadowMap, Bone, BooleanKeyframeTrack, Box2, Box3, Box3Helper, BoxBufferGeometry, BoxGeometry, BoxHelper, BufferAttribute, BufferGeometry, BufferGeometryLoader, ByteType, Cache, Camera, CameraHelper, CanvasTexture, CapsuleBufferGeometry, CapsuleGeometry, CatmullRomCurve3, CineonToneMapping, CircleBufferGeometry, CircleGeometry, ClampToEdgeWrapping, Clock, Color, ColorKeyframeTrack, ColorManagement, CompressedArrayTexture, CompressedTexture, CompressedTextureLoader, ConeBufferGeometry, ConeGeometry, CubeCamera, CubeReflectionMapping, CubeRefractionMapping, CubeTexture, CubeTextureLoader, CubeUVReflectionMapping, CubicBezierCurve, CubicBezierCurve3, CubicInterpolant, CullFaceBack, CullFaceFront, CullFaceFrontBack, CullFaceNone, Curve, CurvePath, CustomBlending, CustomToneMapping, CylinderBufferGeometry, CylinderGeometry, Cylindrical, Data3DTexture, DataArrayTexture, DataTexture, DataTextureLoader, DataUtils, DecrementStencilOp, DecrementWrapStencilOp, DefaultLoadingManager, DepthFormat, DepthStencilFormat, DepthTexture, DirectionalLight, DirectionalLightHelper, DiscreteInterpolant, DisplayP3ColorSpace, DodecahedronBufferGeometry, DodecahedronGeometry, DoubleSide, DstAlphaFactor, DstColorFactor, DynamicCopyUsage, DynamicDrawUsage, DynamicReadUsage, EdgesGeometry, EllipseCurve, EqualDepth, EqualStencilFunc, EquirectangularReflectionMapping, EquirectangularRefractionMapping, Euler, EventDispatcher, ExtrudeBufferGeometry, ExtrudeGeometry, FileLoader, Float16BufferAttribute, Float32BufferAttribute, Float64BufferAttribute, FloatType, Fog, FogExp2, FramebufferTexture, FrontSide, Frustum, GLBufferAttribute, GLSL1, GLSL3, GreaterDepth, GreaterEqualDepth, GreaterEqualStencilFunc, GreaterStencilFunc, GridHelper, Group, HalfFloatType, HemisphereLight, HemisphereLightHelper, HemisphereLightProbe, IcosahedronBufferGeometry, IcosahedronGeometry, ImageBitmapLoader, ImageLoader, ImageUtils, IncrementStencilOp, IncrementWrapStencilOp, InstancedBufferAttribute, InstancedBufferGeometry, InstancedInterleavedBuffer, InstancedMesh, Int16BufferAttribute, Int32BufferAttribute, Int8BufferAttribute, IntType, InterleavedBuffer, InterleavedBufferAttribute, Interpolant, InterpolateDiscrete, InterpolateLinear, InterpolateSmooth, InvertStencilOp, KeepStencilOp, KeyframeTrack, LOD, LatheBufferGeometry, LatheGeometry, Layers, LessDepth, LessEqualDepth, LessEqualStencilFunc, LessStencilFunc, Light, LightProbe, Line, Line3, LineBasicMaterial, LineCurve, LineCurve3, LineDashedMaterial, LineLoop, LineSegments, LinearEncoding, LinearFilter, LinearInterpolant, LinearMipMapLinearFilter, LinearMipMapNearestFilter, LinearMipmapLinearFilter, LinearMipmapNearestFilter, LinearSRGBColorSpace, LinearToneMapping, Loader, LoaderUtils, LoadingManager, LoopOnce, LoopPingPong, LoopRepeat, LuminanceAlphaFormat, LuminanceFormat, MOUSE, Material, MaterialLoader, MathUtils, Matrix3, Matrix4, MaxEquation, Mesh, MeshBasicMaterial, MeshDepthMaterial, MeshDistanceMaterial, MeshLambertMaterial, MeshMatcapMaterial, MeshNormalMaterial, MeshPhongMaterial, MeshPhysicalMaterial, MeshStandardMaterial, MeshToonMaterial, MinEquation, MirroredRepeatWrapping, MixOperation, MultiplyBlending, MultiplyOperation, NearestFilter, NearestMipMapLinearFilter, NearestMipMapNearestFilter, NearestMipmapLinearFilter, NearestMipmapNearestFilter, NeverDepth, NeverStencilFunc, NoBlending, NoColorSpace, NoToneMapping, NormalAnimationBlendMode, NormalBlending, NotEqualDepth, NotEqualStencilFunc, NumberKeyframeTrack, Object3D, ObjectLoader, ObjectSpaceNormalMap, OctahedronBufferGeometry, OctahedronGeometry, OneFactor, OneMinusDstAlphaFactor, OneMinusDstColorFactor, OneMinusSrcAlphaFactor, OneMinusSrcColorFactor, OrthographicCamera, PCFShadowMap, PCFSoftShadowMap, PMREMGenerator, Path, PerspectiveCamera, Plane, PlaneBufferGeometry, PlaneGeometry, PlaneHelper, PointLight, PointLightHelper, Points, PointsMaterial, PolarGridHelper, PolyhedronBufferGeometry, PolyhedronGeometry, PositionalAudio, PropertyBinding, PropertyMixer, QuadraticBezierCurve, QuadraticBezierCurve3, Quaternion, QuaternionKeyframeTrack, QuaternionLinearInterpolant, RED_GREEN_RGTC2_Format, RED_RGTC1_Format, REVISION, RGBADepthPacking, RGBAFormat, RGBAIntegerFormat, RGBA_ASTC_10x10_Format, RGBA_ASTC_10x5_Format, RGBA_ASTC_10x6_Format, RGBA_ASTC_10x8_Format, RGBA_ASTC_12x10_Format, RGBA_ASTC_12x12_Format, RGBA_ASTC_4x4_Format, RGBA_ASTC_5x4_Format, RGBA_ASTC_5x5_Format, RGBA_ASTC_6x5_Format, RGBA_ASTC_6x6_Format, RGBA_ASTC_8x5_Format, RGBA_ASTC_8x6_Format, RGBA_ASTC_8x8_Format, RGBA_BPTC_Format, RGBA_ETC2_EAC_Format, RGBA_PVRTC_2BPPV1_Format, RGBA_PVRTC_4BPPV1_Format, RGBA_S3TC_DXT1_Format, RGBA_S3TC_DXT3_Format, RGBA_S3TC_DXT5_Format, RGB_ETC1_Format, RGB_ETC2_Format, RGB_PVRTC_2BPPV1_Format, RGB_PVRTC_4BPPV1_Format, RGB_S3TC_DXT1_Format, RGFormat, RGIntegerFormat, RawShaderMaterial, Ray, Raycaster, RectAreaLight, RedFormat, RedIntegerFormat, ReinhardToneMapping, RepeatWrapping, ReplaceStencilOp, ReverseSubtractEquation, RingBufferGeometry, RingGeometry, SIGNED_RED_GREEN_RGTC2_Format, SIGNED_RED_RGTC1_Format, SRGBColorSpace, Scene, ShaderChunk, ShaderLib, ShaderMaterial, ShadowMaterial, Shape, ShapeBufferGeometry, ShapeGeometry, ShapePath, ShapeUtils, ShortType, Skeleton, SkeletonHelper, SkinnedMesh, Source, Sphere, SphereBufferGeometry, SphereGeometry, Spherical, SphericalHarmonics3, SplineCurve, SpotLight, SpotLightHelper, Sprite, SpriteMaterial, SrcAlphaFactor, SrcAlphaSaturateFactor, SrcColorFactor, StaticCopyUsage, StaticDrawUsage, StaticReadUsage, StereoCamera, StreamCopyUsage, StreamDrawUsage, StreamReadUsage, StringKeyframeTrack, SubtractEquation, SubtractiveBlending, TOUCH, TangentSpaceNormalMap, TetrahedronBufferGeometry, TetrahedronGeometry, Texture, TextureLoader, TorusBufferGeometry, TorusGeometry, TorusKnotBufferGeometry, TorusKnotGeometry, Triangle, TriangleFanDrawMode, TriangleStripDrawMode, TrianglesDrawMode, TubeBufferGeometry, TubeGeometry, TwoPassDoubleSide, UVMapping, Uint16BufferAttribute, Uint32BufferAttribute, Uint8BufferAttribute, Uint8ClampedBufferAttribute, Uniform, UniformsGroup, UniformsLib, UniformsUtils, UnsignedByteType, UnsignedInt248Type, UnsignedIntType, UnsignedShort4444Type, UnsignedShort5551Type, UnsignedShortType, VSMShadowMap, Vector2, Vector3, Vector4, VectorKeyframeTrack, VideoTexture, WebGL1Renderer, WebGL3DRenderTarget, WebGLArrayRenderTarget, WebGLCubeRenderTarget, WebGLMultipleRenderTargets, WebGLRenderTarget, WebGLRenderer, WebGLUtils, WireframeGeometry, WrapAroundEnding, ZeroCurvatureEnding, ZeroFactor, ZeroSlopeEnding, ZeroStencilOp, _SRGBAFormat, sRGBEncoding };
+//# sourceMappingURL=data:application/json;charset=utf-8;base64,eyJ2ZXJzaW9uIjozLCJmaWxlIjoidGhyZWUubW9kdWxlLmpzIiwic291cmNlcyI6W10sInNvdXJjZXNDb250ZW50IjpbXSwibmFtZXMiOltdLCJtYXBwaW5ncyI6IiJ9

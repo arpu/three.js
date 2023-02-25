@@ -60,7 +60,7 @@ import {
 	VK_FORMAT_R8G8B8A8_UNORM,
 } from '../libs/ktx-parse.module.js';
 import { ZSTDDecoder } from '../libs/zstddec.module.js';
-
+import  basisbin  from '../libs/basis.module.js';
 const _taskCache = new WeakMap();
 
 let _activeLoaders = 0;
@@ -143,13 +143,8 @@ class KTX2Loader extends Loader {
 			jsLoader.setPath( this.transcoderPath );
 			jsLoader.setWithCredentials( this.withCredentials );
 			const jsContent = jsLoader.loadAsync( 'basis_transcoder.js' );
-
-			// Load transcoder WASM binary.
-			const binaryLoader = new FileLoader( this.manager );
-			binaryLoader.setPath( this.transcoderPath );
-			binaryLoader.setResponseType( 'arraybuffer' );
-			binaryLoader.setWithCredentials( this.withCredentials );
-			const binaryContent = binaryLoader.loadAsync( 'basis_transcoder.wasm' );
+			
+			const binaryContent = basisbin;
 
 			this.transcoderPending = Promise.all( [ jsContent, binaryContent ] )
 				.then( ( [ jsContent, binaryContent ] ) => {
